@@ -69,9 +69,8 @@ def request_upload_url(token: str, filename: str) -> tuple[str, str]:
     if data.get("code") != 0:
         sys.exit(f"❌ 请求上传 URL 失败: {data}")
 
-    file_info = data["data"]["files"][0]
     batch_id  = data["data"]["batch_id"]
-    upload_url = file_info["url"]
+    upload_url = data["data"]["file_urls"][0]
 
     print(f"  ✅ 获取上传 URL  batch_id={batch_id}")
     return upload_url, batch_id
