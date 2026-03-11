@@ -1,77 +1,67 @@
 # L0 知识引擎 — 项目状态
 
-> 每次新对话：复制此文件内容粘贴到对话开头
+> 每次新对话：fetch此文件获取最新状态
+> https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/STATUS.md
 
 ## 当前进度
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| OFC Stage 1: 文本切分+标注 | ✅ 完成 | 1427 chunks |
-| OFC Stage 1: 问题母表 | ✅ 完成 | 306 题，14 个领域 |
-| OFC Stage 2: 问题-Chunk 匹配 | ✅ 完成 | 96.1% matched，avg cosine ~0.83 |
-| OFC Stage 3: Claude 蒸馏 | ✅ 完成 | 303条有效原理，$25.6 |
-| OFC Stage 3: 质量检查 | ✅ 完成 | 38条quote过长，50条无数值待处理 |
-| MC Vol2 Stage 1: PDF提取+切分+标注 | 🔄 进行中 | 子对话4运行中 |
-| MC Vol3/4/1 Stage 1 | ⏳ 待做 | 串行，Vol2完成后开始 |
+| OFC Stage 1 | ✅ 完成 | 1427 chunks |
+| OFC Stage 2 | ✅ 完成 | 96.1% matched |
+| OFC Stage 3 | ✅ 完成 | 303条有效原理，$25.6 |
+| MC Vol2 Stage 1 | 🔄 进行中 | 子对话4运行中 |
+| MC Vol3/4/1 Stage 1 | ⏳ 待做 | 串行 |
+| 因果链实验 | 🔄 进行中 | 新子对话验证GraphRAG方向 |
+
+## 架构方向（2026-03-12 确认）
+
+### 最终目标
+三类用户：专业厨师 / 餐饮老板 / 研发团队
+核心能力：因果链推理（不是检索）
+L0定位：解码食谱的钥匙
+
+### 技术方向
+传统RAG + GraphRAG 双引擎
+- RAG：回答"这个原理是什么"
+- GraphRAG：回答"这些原理怎么联动"
+图谱存储：Neo4j（待搭建）
+图谱构建：场景驱动因果链提取（验证中）
+
+### 待确认
+因果链提取实验结果 → 决定是否推倒现有pipeline
 
 ## 技术栈
 
 | 组件 | 选型 |
 |------|------|
 | 蒸馏模型 | Claude Opus 4.6 |
-| API 端点 | http://1.95.142.151:3000 |
-| 切分模型 | qwen3.5:2b（3.7s/chunk） |
-| 标注模型 | qwen3.5:9b（4.5s/chunk） |
-| Embedding | qwen3-embedding:8b（本地 Ollama） |
-| PDF文字提取 | MinerU |
-| PDF视觉提取 | qwen3-vl-plus / 本地qwen3-vl-32b |
-| RAG 平台 | Dify + Weaviate |
+| API | http://1.95.142.151:3000，Bearer认证 |
+| 切分 | qwen3.5:2b（Ollama本地） |
+| 标注 | qwen3.5:9b（Ollama本地） |
+| Embedding | qwen3-embedding:8b |
+| PDF提取 | MinerU + qwen3-vl-plus |
+| 向量库 | Weaviate |
+| 图谱库 | Neo4j（待搭建） |
+| RAG平台 | Dify |
 
-## 关键文件路径（本地）
+## 关键文件
 ```
 /Users/jeff/l0-knowledge-engine/
-├── data/
-│   └── l0_question_master.json                    ✅ 306 题
-├── output/
-│   ├── stage1/chunks_smart.json                   ✅ 1427 chunks (OFC)
-│   ├── stage2/question_chunk_matches.json         ✅ 匹配结果
-│   ├── stage3/l0_principles_fixed.jsonl           ✅ 303条原理
-│   ├── stage3/damaged_questions.jsonl             ⚠️ 3条损坏备份
-│   └── mc/vol2/stage1/chunks_smart.json           🔄 生成中
-├── merge_mineru_qwen.py                           ✅ 合并脚本
-├── mineru_api.py                                  ✅ MinerU脚本
-└── qwen_vision_compare.py                         ✅ 视觉脚本
+├── output/stage3/l0_principles_fixed.jsonl  ✅ 303条L0原理
+├── output/mc/vol2/stage1/                   🔄 生成中
+└── data/l0_question_master.json             ✅ 306题
 ```
 
 ## 书目状态
 
 | 书目 | Stage 1 | Stage 2 | Stage 3 |
 |------|---------|---------|---------|
-| On Food and Cooking (OFC) | ✅ | ✅ | ✅ 303条 |
-| MC Vol 2 - Techniques and Equipment | 🔄 | ⏳ | ⏳ |
-| MC Vol 3 - Animals and Plants | ⏳ | ⏳ | ⏳ |
-| MC Vol 4 - Ingredients and Preparations | ⏳ | ⏳ | ⏳ |
-| MC Vol 1 - History and Fundamentals (epub) | ⏳ | ⏳ | ⏳ |
+| On Food and Cooking | ✅ | ✅ | ✅ 303条 |
+| MC Vol 2 | 🔄 | ⏳ | ⏳ |
+| MC Vol 3 | ⏳ | ⏳ | ⏳ |
+| MC Vol 4 | ⏳ | ⏳ | ⏳ |
+| MC Vol 1 (epub) | ⏳ | ⏳ | ⏳ |
 
-## OFC 原理质量遗留问题
-
-| 问题 | 数量 | 处理方式 |
-|------|------|---------|
-| citation_quote 过长 | 38条 | 待处理 |
-| scientific_statement 无数值 | 50条 | 人工判断 |
-| 损坏记录 | 3条 | 可选重跑 |
-
-## Skills
-
-| Skill | 说明 |
-|-------|------|
-| skills/SKILL_question_chunk_matching.md | Stage 2 语义匹配 |
-| skills/SKILL_llm_distill_pipeline.md | Stage 3 蒸馏pipeline |
-| skills/SKILL_pdf_vision_extraction.md | MC PDF视觉提取 |
-
-## 下一步
-
-1. 🔄 等MC Vol2 Stage 1完成
-2. 🔜 MC Vol3/4/1 串行
-3. 🔜 OFC L1 pipeline设计
-4. 🔜 多书合并去重
+## Scripts（GitHub备份）
+https://github.com/hanny9494-ai/L0-systerm/tree/main/scripts
