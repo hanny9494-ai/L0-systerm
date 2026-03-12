@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.util
 import json
 import os
 import re
@@ -90,24 +91,34 @@ MINERU_MAX_PAGES = 200
 MINERU_MAX_MB = 100.0
 MINERU_DAILY_PAGE_LIMIT = 2000
 
-VISION_PROMPT = """You are extracting non-body visual content from a book page.
-Return JSON only with this schema:
-{
-  "tables": [{"title": "", "markdown": "", "notes": ""}],
-  "figures": [{"type": "table|diagram|photo|chart|other", "description": ""}],
-  "page_note": ""
-}
+VISION_PROMPT = """请逐一提取这一页的每个独立内容元素，用JSON数组输出：
 
-Rules:
-- Focus on tables, charts, diagrams, labeled figures, and image-only explanatory content.
-- Do not transcribe ordinary running body paragraphs unless needed to explain a visual.
-- Preserve units and numbers.
-- If there is no useful visual content, return empty arrays and an empty page_note.
+[
+  {
+    "type": "table",
+    "content": "完整Markdown表格"
+  },
+  {
+    "type": "figure",
+    "content": "图片描述1-2句"
+  },
+  {
+    "type": "text_block",
+    "content": "独立文字段落（如有）"
+  }
+]
+
+规则：
+- 每个表格单独一个元素。
+- 每张图片、示意图或图表单独一个元素。
+- 有几个就输出几个，不要合并。
+- 不要抄写普通正文段落，只保留视觉相关内容。
+- 只输出JSON数组，不要其他说明。
 """
 
 SPLIT_PROMPT_TEMPLATE = """You are splitting a book chapter into semantic chunks.
 Return JSON only with this schema:
-{"chunks": ["chunk text 1", "chunk text 2"]}
+{{"chunks": ["chunk text 1", "chunk text 2"]}}
 
 Rules:
 - Keep original language and wording from the source.
@@ -125,10 +136,10 @@ Chapter text:
 
 ANNOTATE_PROMPT_TEMPLATE = """You are annotating a food-science chunk.
 Return JSON only with this schema:
-{
+{{
   "summary": "Chinese summary within 50 characters",
   "topics": ["one_or_more_allowed_topics"]
-}
+}}
 
 Allowed topics:
 {topics}
@@ -200,6 +211,11 @@ def load_json(path: Path, default: Any) -> Any:
 def save_json(path: Path, data: Any) -> None:
     ensure_dir(path.parent)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_json_list(path: Path) -> List[Any]:
+    data = load_json(path, [])
+    return data if isinstance(data, list) else []
 
 
 def status_rank(status: str) -> int:
@@ -328,6 +344,95 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     return json.loads(stripped[start : end + 1])
 
 
+def extract_json_value(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    starts = [(stripped.find("{"), "{"), (stripped.find("["), "[")]
+    starts = [(idx, token) for idx, token in starts if idx != -1]
+    if not starts:
+        raise ValueError("No JSON object or array found")
+    start, token = min(starts, key=lambda item: item[0])
+    end_token = "}" if token == "{" else "]"
+    end = stripped.rfind(end_token)
+    if end == -1 or end <= start:
+        raise ValueError("No complete JSON payload found")
+    return json.loads(stripped[start : end + 1])
+
+
+def normalize_vision_parsed(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, list):
+        elements: List[Dict[str, str]] = []
+        tables: List[Dict[str, str]] = []
+        figures: List[Dict[str, str]] = []
+        text_blocks: List[str] = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            element_type = str(raw.get("type") or "").strip().lower()
+            content = str(raw.get("content") or "").strip()
+            if not content:
+                continue
+            if element_type == "table":
+                tables.append({"title": "", "markdown": content, "notes": ""})
+                elements.append({"type": "table", "content": content})
+            elif element_type == "figure":
+                figures.append({"type": "figure", "description": content})
+                elements.append({"type": "figure", "content": content})
+            elif element_type == "text_block":
+                text_blocks.append(content)
+                elements.append({"type": "text_block", "content": content})
+        return {
+            "elements": elements,
+            "tables": tables,
+            "figures": figures,
+            "text_blocks": text_blocks,
+            "page_note": "",
+        }
+    if isinstance(payload, dict):
+        tables: List[Dict[str, str]] = []
+        figures: List[Dict[str, str]] = []
+        elements: List[Dict[str, str]] = []
+        text_blocks = payload.get("text_blocks") or []
+        if not isinstance(text_blocks, list):
+            text_blocks = []
+        normalized_text_blocks = [str(item).strip() for item in text_blocks if str(item).strip()]
+        for table in payload.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            markdown = str(table.get("markdown") or "").strip()
+            title = str(table.get("title") or "").strip()
+            notes = str(table.get("notes") or "").strip()
+            if not markdown:
+                continue
+            table_item = {"title": title, "markdown": markdown, "notes": notes}
+            tables.append(table_item)
+            elements.append({"type": "table", "content": markdown})
+        for figure in payload.get("figures") or []:
+            if not isinstance(figure, dict):
+                continue
+            description = str(figure.get("description") or "").strip()
+            figure_type = str(figure.get("type") or "figure").strip() or "figure"
+            if not description:
+                continue
+            figure_item = {"type": figure_type, "description": description}
+            figures.append(figure_item)
+            elements.append({"type": "figure", "content": description, "figure_type": figure_type})
+        page_note = str(payload.get("page_note") or "").strip()
+        if page_note:
+            normalized_text_blocks.append(page_note)
+            elements.append({"type": "text_block", "content": page_note})
+        return {
+            "elements": elements,
+            "tables": tables,
+            "figures": figures,
+            "text_blocks": normalized_text_blocks,
+            "page_note": page_note,
+        }
+    raise ValueError("Unsupported vision payload type")
+
+
 def post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None, timeout: int = 120) -> Dict[str, Any]:
     response = requests.post(url, json=payload, headers=headers or {}, timeout=timeout)
     response.raise_for_status()
@@ -443,7 +548,7 @@ def upload_to_presigned_url(upload_url: str, pdf_path: Path) -> None:
 
 def poll_mineru_batch(token: str, batch_id: str, timeout_sec: int = 3600) -> str:
     started = time.time()
-    url = f"{MINERU_BASE_URL}/extract/batch/result/{batch_id}"
+    url = f"{MINERU_BASE_URL}/extract-results/batch/{batch_id}"
     while time.time() - started < timeout_sec:
         response = requests.get(url, headers=mineru_headers(token), timeout=60)
         response.raise_for_status()
@@ -463,6 +568,24 @@ def poll_mineru_batch(token: str, batch_id: str, timeout_sec: int = 3600) -> str
             raise PipelineError(f"MinerU extraction failed: {result.get('err_msg')}")
         time.sleep(5)
     raise PipelineError(f"MinerU polling timed out for batch {batch_id}")
+
+
+def infer_resume_status(book: BookSpec, book_dir: Path) -> str:
+    stage1_chunks = book_dir / "stage1" / "chunks_smart.json"
+    if stage1_chunks.exists() and isinstance(load_json(stage1_chunks, []), list) and len(load_json(stage1_chunks, [])) > 0:
+        return "completed"
+    chunks_raw = book_dir / "chunks_raw.json"
+    if chunks_raw.exists() and isinstance(load_json(chunks_raw, []), list) and len(load_json(chunks_raw, [])) > 0:
+        return "step4_done"
+    if (book_dir / "raw_merged.md").exists():
+        return "step3_done"
+    if (book_dir / "raw_vision.json").exists():
+        return "step2_done"
+    if (book_dir / "raw_mineru.md").exists():
+        return "step1_done"
+    if book.file_type == "epub" and (book_dir / f"{book.slug}.pdf").exists():
+        return "step0_done"
+    return "pending"
 
 
 def download_mineru_result(zip_url: str, out_dir: Path, stem: str) -> Path:
@@ -620,7 +743,7 @@ def recognize_page_visual(api_key: str, png_path: Path, page_num: int) -> Dict[s
     response.raise_for_status()
     body = response.json()
     message = (((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-    parsed = extract_json_object(message)
+    parsed = normalize_vision_parsed(extract_json_value(message))
     return {
         "page_num": page_num,
         "image_path": str(png_path),
@@ -637,13 +760,41 @@ def run_step2_vision(pdf_path: Path, book_dir: Path) -> Path:
     pages_dir = book_dir / "pages_150dpi"
     vision_path = book_dir / "raw_vision.json"
     page_paths = render_pdf_pages(pdf_path, pages_dir, dpi=PNG_DPI)
+    target_pages = build_visual_target_pages(book_dir)
+    page_meta_map = build_page_metadata_map(book_dir)
+    if not target_pages:
+        save_json(
+            vision_path,
+            {
+                "expected_pages": len(page_paths),
+                "target_pages": [],
+                "updated_at": now_iso(),
+                "pages": [],
+            },
+        )
+        return vision_path
     existing = load_json(vision_path, {"pages": []})
     page_results = {int(item["page_num"]): item for item in existing.get("pages", []) if "page_num" in item}
-    pages_out: List[Dict[str, Any]] = []
-    print(f"[step2] rendering/vision for {len(page_paths)} page(s)")
-    for page_num, png_path in enumerate(page_paths, start=1):
-        if page_num in page_results and page_results[page_num].get("parsed") is not None:
-            pages_out.append(page_results[page_num])
+
+    def persist() -> None:
+        save_json(
+            vision_path,
+            {
+                "expected_pages": len(page_paths),
+                "target_pages": target_pages,
+                "updated_at": now_iso(),
+                "pages": [page_results[idx] for idx in sorted(page_results)],
+            },
+        )
+
+    print(f"[step2] rendering/vision for {len(target_pages)} target page(s) out of {len(page_paths)} total")
+    for page_num in target_pages:
+        png_path = page_paths[page_num - 1]
+        existing_result = page_results.get(page_num)
+        page_meta = page_meta_map.get(page_num, {"pdf_page_num": page_num, "book_page_label": None, "book_page_candidates": []})
+        if existing_result and existing_result.get("parsed") is not None:
+            existing_result.update(page_meta)
+            page_results[page_num] = existing_result
             continue
         print(f"  [step2] page {page_num}/{len(page_paths)}")
         try:
@@ -654,10 +805,11 @@ def run_step2_vision(pdf_path: Path, book_dir: Path) -> Path:
                 "image_path": str(png_path),
                 "error": str(exc),
             }
-        pages_out.append(result)
-        save_json(vision_path, {"pages": sorted(pages_out, key=lambda item: item["page_num"])})
+        result.update(page_meta)
+        page_results[page_num] = result
+        persist()
         time.sleep(0.3)
-    save_json(vision_path, {"pages": sorted(pages_out, key=lambda item: item["page_num"])})
+    persist()
     return vision_path
 
 
@@ -671,13 +823,17 @@ def visual_blocks_from_entry(entry: Dict[str, Any]) -> List[str]:
         return []
     parsed = entry.get("parsed") or {}
     page_num = entry.get("page_num")
+    book_page_label = entry.get("book_page_label")
     blocks: List[str] = []
+    page_suffix = f" pdf-page {page_num}"
+    if book_page_label:
+        page_suffix += f", book-page {book_page_label}"
     for table in parsed.get("tables") or []:
         markdown = str((table or {}).get("markdown") or "").strip()
         title = str((table or {}).get("title") or "").strip()
         notes = str((table or {}).get("notes") or "").strip()
         if markdown:
-            header = f"<!-- qwen3-vl-plus page {page_num} table"
+            header = f"<!-- qwen3-vl-plus{page_suffix} table"
             if title:
                 header += f": {title}"
             header += " -->"
@@ -689,42 +845,215 @@ def visual_blocks_from_entry(entry: Dict[str, Any]) -> List[str]:
         description = str((figure or {}).get("description") or "").strip()
         figure_type = str((figure or {}).get("type") or "figure").strip()
         if description:
-            blocks.append(f"> [{figure_type} page {page_num}] {description}")
+            blocks.append(f"> [{figure_type}{page_suffix}] {description}")
     page_note = str(parsed.get("page_note") or "").strip()
     if page_note:
-        blocks.append(f"> [page {page_num}] {page_note}")
+        blocks.append(f"> [{page_suffix.strip()}] {page_note}")
     return blocks
+
+
+def collect_image_paths(node: Any, out: List[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"image_path", "img_path"} and isinstance(value, str):
+                out.append(Path(value).name)
+            else:
+                collect_image_paths(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            collect_image_paths(item, out)
+
+
+def collect_text_spans(node: Any, out: List[str]) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "text" and isinstance(node.get("content"), str):
+            text = node["content"].strip()
+            if text:
+                out.append(text)
+        for value in node.values():
+            collect_text_spans(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            collect_text_spans(item, out)
+
+
+def looks_like_page_label(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if not cleaned or len(cleaned) > 24:
+        return False
+    if re.fullmatch(r"[ivxlcdmIVXLCDM]+", cleaned):
+        return True
+    if re.fullmatch(r"\d{1,4}", cleaned):
+        return True
+    if re.fullmatch(r"[A-Za-z]|\d+\s*[A-Za-z]?", cleaned):
+        return True
+    return False
+
+
+def extract_page_label_candidates(page: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    for key in ["discarded_blocks", "preproc_blocks"]:
+        for block in page.get(key) or []:
+            texts: List[str] = []
+            collect_text_spans(block, texts)
+            joined = " ".join(texts).strip()
+            if not joined:
+                continue
+            if looks_like_page_label(joined):
+                candidates.append(joined)
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def build_image_page_map(book_dir: Path) -> Dict[str, int]:
+    parts_progress_path = book_dir / "mineru_parts_progress.json"
+    parts_progress = load_json(parts_progress_path, {"parts": []})
+    image_page_map: Dict[str, int] = {}
+    for part in parts_progress.get("parts", []):
+        part_id = str(part.get("part_id") or "")
+        page_start = int(part.get("page_start") or 1)
+        md_path = Path(str(part.get("md_path") or ""))
+        if not part_id or not md_path.exists():
+            continue
+        content_list_path = md_path.parent / f"{part_id}_content_list.json"
+        if not content_list_path.exists():
+            continue
+        content_list = load_json(content_list_path, {})
+        if isinstance(content_list, dict):
+            pdf_info = content_list.get("pdf_info") or []
+        elif isinstance(content_list, list):
+            pdf_info = content_list
+        else:
+            pdf_info = []
+        for page in pdf_info:
+            if not isinstance(page, dict):
+                continue
+            page_idx = int(page.get("page_idx") or 0)
+            actual_page = page_start + page_idx
+            image_paths: List[str] = []
+            collect_image_paths(page, image_paths)
+            for image_name in image_paths:
+                image_page_map.setdefault(image_name, actual_page)
+    return image_page_map
+
+
+def build_page_image_sequence(book_dir: Path) -> Dict[int, List[str]]:
+    parts_progress_path = book_dir / "mineru_parts_progress.json"
+    parts_progress = load_json(parts_progress_path, {"parts": []})
+    page_images: Dict[int, List[str]] = {}
+    for part in parts_progress.get("parts", []):
+        part_id = str(part.get("part_id") or "")
+        page_start = int(part.get("page_start") or 1)
+        md_path = Path(str(part.get("md_path") or ""))
+        if not part_id or not md_path.exists():
+            continue
+        content_list_path = md_path.parent / f"{part_id}_content_list.json"
+        if not content_list_path.exists():
+            continue
+        content_list = load_json(content_list_path, {})
+        if isinstance(content_list, dict):
+            pdf_info = content_list.get("pdf_info") or []
+        elif isinstance(content_list, list):
+            pdf_info = content_list
+        else:
+            pdf_info = []
+        for page in pdf_info:
+            if not isinstance(page, dict):
+                continue
+            page_idx = int(page.get("page_idx") or 0)
+            actual_page = page_start + page_idx
+            image_paths: List[str] = []
+            collect_image_paths(page, image_paths)
+            if image_paths:
+                page_images[actual_page] = [Path(name).name for name in image_paths]
+    return page_images
+
+
+def build_visual_target_pages(book_dir: Path) -> List[int]:
+    return sorted(set(build_image_page_map(book_dir).values()))
+
+
+def build_page_metadata_map(book_dir: Path) -> Dict[int, Dict[str, Any]]:
+    parts_progress_path = book_dir / "mineru_parts_progress.json"
+    parts_progress = load_json(parts_progress_path, {"parts": []})
+    meta_map: Dict[int, Dict[str, Any]] = {}
+    for part in parts_progress.get("parts", []):
+        part_id = str(part.get("part_id") or "")
+        page_start = int(part.get("page_start") or 1)
+        md_path = Path(str(part.get("md_path") or ""))
+        if not part_id or not md_path.exists():
+            continue
+        content_list_path = md_path.parent / f"{part_id}_content_list.json"
+        if not content_list_path.exists():
+            continue
+        content_list = load_json(content_list_path, {})
+        if isinstance(content_list, dict):
+            pdf_info = content_list.get("pdf_info") or []
+        elif isinstance(content_list, list):
+            pdf_info = content_list
+        else:
+            pdf_info = []
+        for page in pdf_info:
+            if not isinstance(page, dict):
+                continue
+            page_idx = int(page.get("page_idx") or 0)
+            actual_page = page_start + page_idx
+            candidates = extract_page_label_candidates(page)
+            meta_map[actual_page] = {
+                "pdf_page_num": actual_page,
+                "part_id": part_id,
+                "part_page_idx": page_idx,
+                "book_page_candidates": candidates,
+                "book_page_label": candidates[0] if candidates else None,
+            }
+    return meta_map
+
+
+def load_merge_helper():
+    try:
+        from merge_mineru_qwen import merge_mineru_qwen
+
+        return merge_mineru_qwen
+    except ModuleNotFoundError:
+        script_path = Path(__file__).with_name("merge_mineru_qwen.py")
+        spec = importlib.util.spec_from_file_location("merge_mineru_qwen", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.merge_mineru_qwen
 
 
 def run_step3_merge(book_dir: Path) -> Path:
     raw_mineru_path = book_dir / "raw_mineru.md"
     raw_vision_path = book_dir / "raw_vision.json"
     merged_path = book_dir / "raw_merged.md"
-    mineru_text = raw_mineru_path.read_text(encoding="utf-8", errors="ignore")
-    vision_data = load_json(raw_vision_path, {"pages": []})
-    replacement_queue: List[str] = []
-    for entry in sorted(vision_data.get("pages", []), key=lambda item: item.get("page_num", 0)):
-        replacement_queue.extend(visual_blocks_from_entry(entry))
-    placeholders = list(re.finditer(r"!\[.*?\]\([^)]+\)", mineru_text))
-    replaced_parts: List[str] = []
-    cursor = 0
-    queue_index = 0
-    for match in placeholders:
-        replaced_parts.append(mineru_text[cursor : match.start()])
-        if queue_index < len(replacement_queue):
-            replaced_parts.append("\n" + replacement_queue[queue_index] + "\n")
-            queue_index += 1
-        else:
-            replaced_parts.append(match.group(0))
-        cursor = match.end()
-    replaced_parts.append(mineru_text[cursor:])
-    merged = "".join(replaced_parts)
-    extras = replacement_queue[queue_index:]
-    if extras:
-        merged += "\n\n---\n\n## Additional qwen3-vl-plus extracted visuals\n\n"
-        merged += "\n\n".join(extras)
-    merged = re.sub(r"\n{4,}", "\n\n\n", merged).strip() + "\n"
-    merged_path.write_text(merged, encoding="utf-8")
+    parts_progress_path = book_dir / "mineru_parts_progress.json"
+    parts_progress = load_json(parts_progress_path, {"parts": []})
+    content_list_paths: List[str] = []
+    for part in parts_progress.get("parts", []):
+        part_id = str(part.get("part_id") or "")
+        md_path = Path(str(part.get("md_path") or ""))
+        if not part_id or not md_path.exists():
+            continue
+        content_list_path = md_path.parent / f"{part_id}_content_list.json"
+        if content_list_path.exists():
+            content_list_paths.append(str(content_list_path))
+    if not content_list_paths:
+        content_list_paths = [str(book_dir / "mineru_parts")]
+    merge_mineru_qwen = load_merge_helper()
+    merge_mineru_qwen(
+        mineru_path=raw_mineru_path,
+        vision_path=raw_vision_path,
+        content_list_paths=content_list_paths,
+        output_path=merged_path,
+        report_path=book_dir / "raw_merge_report.json",
+    )
     return merged_path
 
 
@@ -802,15 +1131,14 @@ def run_step4_chunk(book: BookSpec, book_dir: Path) -> Tuple[Path, int]:
     chunks_path = book_dir / "chunks_raw.json"
     failed_path = book_dir / "failed_chapters.json"
     chapters = split_markdown_into_chapters(merged_path.read_text(encoding="utf-8", errors="ignore"))
-    existing_chunks = load_json(chunks_path, [])
-    failed_chapters = load_json(failed_path, [])
+    existing_chunks = load_json_list(chunks_path)
+    failed_chapters: List[Dict[str, Any]] = []
     done_keys = {(int(item["chapter_num"]), str(item["chapter_title"])) for item in existing_chunks if "chapter_num" in item}
-    failed_keys = {(int(item["chapter_num"]), str(item["chapter_title"])) for item in failed_chapters if "chapter_num" in item}
     next_chunk_idx = (max((int(item["chunk_idx"]) for item in existing_chunks), default=-1) + 1)
     print(f"[step4] chapter chunking for {len(chapters)} chapter(s)")
     for chapter in chapters:
         chapter_key = (chapter.chapter_num, chapter.chapter_title)
-        if chapter_key in done_keys or chapter_key in failed_keys:
+        if chapter_key in done_keys:
             continue
         print(f"  [step4] chapter {chapter.chapter_num}: {chapter.chapter_title}")
         try:
@@ -838,6 +1166,7 @@ def run_step4_chunk(book: BookSpec, book_dir: Path) -> Tuple[Path, int]:
                 }
             )
             save_json(failed_path, failed_chapters)
+    save_json(failed_path, failed_chapters)
     if not chunks_path.exists():
         save_json(chunks_path, existing_chunks)
     return chunks_path, len(existing_chunks)
@@ -867,9 +1196,9 @@ def run_step5_annotate(book_dir: Path) -> Tuple[Path, int]:
     stage1_dir = ensure_dir(book_dir / "stage1")
     out_path = stage1_dir / "chunks_smart.json"
     failures_path = stage1_dir / "annotation_failures.json"
-    chunks = load_json(chunks_path, [])
-    annotated = load_json(out_path, [])
-    failures = load_json(failures_path, [])
+    chunks = load_json_list(chunks_path)
+    annotated = load_json_list(out_path)
+    failures = load_json_list(failures_path)
     annotated_ids = {int(item["chunk_idx"]) for item in annotated if "chunk_idx" in item}
     failure_ids = {int(item["chunk_idx"]) for item in failures if "chunk_idx" in item}
     processed_since_save = 0
@@ -923,6 +1252,17 @@ def process_book(
     book_dir = ensure_dir(output_root / book.slug)
     entry = ensure_book_progress(batch_progress, book.book_id)
     current_status = entry["status"]
+    inferred_status = infer_resume_status(book, book_dir)
+    if current_status == "failed":
+        current_status = inferred_status
+        entry["status"] = current_status
+        entry["updated_at"] = now_iso()
+        save_batch_progress(batch_progress_path, batch_progress)
+    elif status_rank(inferred_status) > status_rank(current_status):
+        current_status = inferred_status
+        entry["status"] = current_status
+        entry["updated_at"] = now_iso()
+        save_batch_progress(batch_progress_path, batch_progress)
     work_pdf = book.path if book.file_type == "pdf" else book_dir / f"{book.slug}.pdf"
     print(f"\n=== {book.book_id} ({current_status}) ===")
 
@@ -949,6 +1289,8 @@ def process_book(
 
     if status_rank(entry["status"]) < status_rank("step4_done"):
         _, total_chunks = run_step4_chunk(book, book_dir)
+        if total_chunks <= 0:
+            raise PipelineError("step4 produced 0 chunks")
         set_book_status(
             batch_progress,
             batch_progress_path,
@@ -959,6 +1301,8 @@ def process_book(
 
     if status_rank(entry["status"]) < status_rank("completed"):
         _, total_annotated = run_step5_annotate(book_dir)
+        if total_annotated <= 0:
+            raise PipelineError("step5 produced 0 annotated chunks")
         set_book_status(
             batch_progress,
             batch_progress_path,

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "mc_vol2",
+    "path": "/Users/jeff/Documents/厨书数据库/工具科学书/Volume 2 - Techniques and Equipment.pdf",
+    "type": "pdf"
+  },
+  {
+    "id": "mc_vol3",
+    "path": "/Users/jeff/Documents/厨书数据库/工具科学书/Volume 3 - Animals and Plants.pdf",
+    "type": "pdf"
+  },
+  {
+    "id": "mc_vol4",
+    "path": "/Users/jeff/Documents/厨书数据库/工具科学书/Volume 4 - Ingredients and Preparations.pdf",
+    "type": "pdf"
+  },
+  {
+    "id": "mc_vol1",
+    "path": "/Users/jeff/Documents/厨书数据库/工具科学书/volume-1-History+and+Fundamentals.epub",
+    "type": "epub"
+  }
+]

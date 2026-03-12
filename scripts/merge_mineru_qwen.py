@@ -1,199 +1,464 @@
 #!/usr/bin/env python3
-"""
-合并脚本：MinerU 文字 + qwen-vl 表格/图片识别 → 完整 MD
-策略：
-  - MinerU 提供文字段落（准确、完整）
-  - qwen-vl 提供表格和图片描述（MinerU 无法识别的部分）
-  - 按页顺序合并，qwen 内容插入对应位置
-"""
+"""Merge MinerU markdown with page-aware Qwen vision output."""
 
-import re
+from __future__ import annotations
+
+import argparse
 import json
+import re
 from pathlib import Path
-
-MINERU_MD  = Path('/Users/jeff/l0-knowledge-engine/output/comparison/mineru/full.md')
-RAW_JSON   = Path('/Users/jeff/l0-knowledge-engine/output/comparison/raw_results.json')
-OUTPUT_MD  = Path('/Users/jeff/l0-knowledge-engine/output/comparison/ch13_merged.md')
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-def load_qwen_results(raw_json: Path) -> list[dict]:
-    data = json.loads(raw_json.read_text(encoding='utf-8'))
-    return [r for r in data['qwen'] if 'error' not in r]
+PLACEHOLDER_RE = re.compile(r"!\[.*?\]\(([^)]+)\)")
+PAGE_IMAGE_RE = re.compile(r"(?:^|/)p(\d+)_img\d+\.(?:png|jpg|jpeg)$", re.IGNORECASE)
 
 
-def extract_tables_from_qwen(text: str) -> list[str]:
-    """从 qwen 输出中提取所有 Markdown 表格"""
-    tables = re.findall(r'(?:^\|.+\n)+', text, re.MULTILINE)
-    return [t.strip() for t in tables if len(t.strip().split('\n')) >= 2]
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return default
 
 
-def extract_image_descriptions(text: str) -> list[str]:
-    """提取图片描述段落（非表格、非正文标题的段落）"""
-    # 去掉表格
-    text_no_tables = re.sub(r'(?:^\|.+\n)+', '', text, flags=re.MULTILINE)
-    # 找图片描述（通常包含photo/图/figure等关键词）
-    descs = []
-    for para in re.split(r'\n{2,}', text_no_tables):
-        para = para.strip()
-        if not para:
+def iter_pdf_pages(content_list: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(content_list, dict):
+        pdf_info = content_list.get("pdf_info") or []
+    elif isinstance(content_list, list):
+        pdf_info = content_list
+    else:
+        pdf_info = []
+    for page in pdf_info:
+        if isinstance(page, dict):
+            yield page
+
+
+def collect_image_paths(node: Any, out: List[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"image_path", "img_path"} and isinstance(value, str):
+                out.append(Path(value).name)
+            else:
+                collect_image_paths(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            collect_image_paths(item, out)
+
+
+def discover_content_lists(paths: Sequence[str | Path]) -> List[Path]:
+    discovered: List[Path] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_dir():
+            discovered.extend(sorted(path.rglob("*_content_list.json")))
+        elif path.exists():
+            discovered.append(path)
+    seen: set[Path] = set()
+    deduped: List[Path] = []
+    for path in discovered:
+        resolved = path.resolve()
+        if resolved in seen:
             continue
-        if re.search(r'photo|图|figure|照片|image|shows?|depicts?|illustrat', para, re.I):
-            descs.append(para)
-    return descs
+        seen.add(resolved)
+        deduped.append(path)
+    return deduped
 
 
-def build_mineru_sections(md_path: Path) -> list[dict]:
-    """把 MinerU MD 切成段落块，保留原始顺序"""
-    text  = md_path.read_text(encoding='utf-8')
-    lines = text.splitlines(keepends=True)
+def load_part_offsets(content_list_paths: Sequence[Path]) -> Dict[str, int]:
+    offsets: Dict[str, int] = {}
+    for path in content_list_paths:
+        part_id = path.stem.removesuffix("_content_list")
+        progress_path = path.parents[2] / "mineru_parts_progress.json"
+        progress = load_json(progress_path, {"parts": []})
+        for part in progress.get("parts", []):
+            if str(part.get("part_id") or "") != part_id:
+                continue
+            offsets[part_id] = int(part.get("page_start") or 1)
+            break
+    return offsets
 
-    sections = []
-    current  = []
-    current_heading = ''
 
-    for line in lines:
-        if re.match(r'^#{1,2} ', line):
-            if current:
-                sections.append({
-                    'heading': current_heading,
-                    'text': ''.join(current).strip(),
-                    'has_img_placeholder': '![](' in ''.join(current),
-                })
-            current_heading = line.strip()
-            current = [line]
+def build_image_page_map(content_list_paths: Sequence[Path]) -> Dict[str, int]:
+    part_offsets = load_part_offsets(content_list_paths)
+    image_page_map: Dict[str, int] = {}
+    for path in content_list_paths:
+        part_id = path.stem.removesuffix("_content_list")
+        page_start = part_offsets.get(part_id, 1)
+        content_list = load_json(path, {})
+        for page in iter_pdf_pages(content_list):
+            page_num = int(page.get("page_num") or 0)
+            if page_num <= 0:
+                page_num = page_start + int(page.get("page_idx") or 0)
+            image_paths: List[str] = []
+            collect_image_paths(page, image_paths)
+            for image_name in image_paths:
+                image_page_map.setdefault(Path(image_name).name, page_num)
+    return image_page_map
+
+
+def format_table_item(table: Dict[str, Any], page_num: int, book_page_label: Optional[str]) -> Optional[str]:
+    markdown = str((table or {}).get("markdown") or "").strip()
+    if not markdown:
+        return None
+    title = str((table or {}).get("title") or "").strip()
+    notes = str((table or {}).get("notes") or "").strip()
+    suffix = f"pdf-page {page_num}"
+    if book_page_label:
+        suffix += f", book-page {book_page_label}"
+    header = f"<!-- qwen3-vl-plus {suffix} table"
+    if title:
+        header += f": {title}"
+    header += " -->"
+    block = f"{header}\n{markdown}"
+    if notes:
+        block += f"\n\n> Note: {notes}"
+    return block
+
+
+def format_figure_item(figure: Dict[str, Any], page_num: int, book_page_label: Optional[str]) -> Optional[str]:
+    description = str((figure or {}).get("description") or "").strip()
+    if not description:
+        return None
+    figure_type = str((figure or {}).get("type") or "figure").strip() or "figure"
+    suffix = f"pdf-page {page_num}"
+    if book_page_label:
+        suffix += f", book-page {book_page_label}"
+    return f"> [{figure_type} {suffix}] {description}"
+
+
+def format_text_block_item(content: str, page_num: int, book_page_label: Optional[str]) -> Optional[str]:
+    text = str(content or "").strip()
+    if not text:
+        return None
+    suffix = f"pdf-page {page_num}"
+    if book_page_label:
+        suffix += f", book-page {book_page_label}"
+    return f"> [text_block {suffix}] {text}"
+
+
+def normalize_page_elements(parsed: Any) -> List[Dict[str, str]]:
+    if isinstance(parsed, list):
+        return [
+            {
+                "type": str(item.get("type") or "").strip().lower(),
+                "content": str(item.get("content") or "").strip(),
+            }
+            for item in parsed
+            if isinstance(item, dict) and str(item.get("content") or "").strip()
+        ]
+    if isinstance(parsed, dict):
+        raw_elements = parsed.get("elements")
+        if isinstance(raw_elements, list):
+            return [
+                {
+                    "type": str(item.get("type") or "").strip().lower(),
+                    "content": str(item.get("content") or "").strip(),
+                    "figure_type": str(item.get("figure_type") or "").strip().lower(),
+                }
+                for item in raw_elements
+                if isinstance(item, dict) and str(item.get("content") or "").strip()
+            ]
+    return []
+
+
+def build_page_items(entry: Dict[str, Any]) -> List[str]:
+    if entry.get("error"):
+        return []
+    parsed = entry.get("parsed") or {}
+    page_num = int(entry.get("pdf_page_num") or entry.get("page_num") or 0)
+    book_page_label = entry.get("book_page_label")
+    items: List[str] = []
+    elements = normalize_page_elements(parsed)
+    if elements:
+        for element in elements:
+            element_type = element.get("type") or ""
+            content = element.get("content") or ""
+            if element_type == "table":
+                item = format_table_item({"markdown": content, "title": "", "notes": ""}, page_num, book_page_label)
+            elif element_type == "figure":
+                item = format_figure_item(
+                    {"type": element.get("figure_type") or "figure", "description": content},
+                    page_num,
+                    book_page_label,
+                )
+            elif element_type == "text_block":
+                item = format_text_block_item(content, page_num, book_page_label)
+            else:
+                item = format_text_block_item(content, page_num, book_page_label)
+            if item:
+                items.append(item)
+        return items
+    for table in parsed.get("tables") or []:
+        item = format_table_item(table, page_num, book_page_label)
+        if item:
+            items.append(item)
+    for figure in parsed.get("figures") or []:
+        item = format_figure_item(figure, page_num, book_page_label)
+        if item:
+            items.append(item)
+    for text_block in parsed.get("text_blocks") or []:
+        item = format_text_block_item(str(text_block), page_num, book_page_label)
+        if item:
+            items.append(item)
+    page_note = str(parsed.get("page_note") or "").strip()
+    if page_note:
+        suffix = f"pdf-page {page_num}"
+        if book_page_label:
+            suffix += f", book-page {book_page_label}"
+        items.append(f"> [{suffix}] {page_note}")
+    return items
+
+
+def summarize_page_items(items: Sequence[str]) -> str:
+    snippets: List[str] = []
+    for item in items:
+        text = re.sub(r"<!--.*?-->", "", item, flags=re.DOTALL)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            snippets.append(text)
+        if len(snippets) >= 3:
+            break
+    summary = " ".join(snippets).strip()
+    if len(summary) > 360:
+        summary = summary[:357].rstrip() + "..."
+    return summary
+
+
+def build_summary_fallback(page_num: int, occurrence: int, items: Sequence[str], book_page_label: Optional[str]) -> str:
+    suffix = f"pdf-page {page_num}"
+    if book_page_label:
+        suffix += f", book-page {book_page_label}"
+    summary = summarize_page_items(items)
+    if summary:
+        return (
+            f"> [第{occurrence}个图片/表格，来自同页内容汇总，{suffix}] "
+            f"同页视觉内容已超过逐项分配数量，请参考本页已提取内容。摘要：{summary}"
+        )
+    return f"> [第{occurrence}个图片/表格，来自同页内容汇总，{suffix}] 同页已有视觉内容，但当前摘要为空。"
+
+
+def build_warning_fallback(page_num: Optional[int], reason: Optional[str], book_page_label: Optional[str]) -> str:
+    if page_num is None:
+        page_label = "页码未知"
+    else:
+        page_label = f"页码{page_num}"
+        if book_page_label:
+            page_label += f" / 书页{book_page_label}"
+    reason_label = {
+        "qwen_error": "qwen识别失败",
+        "no_qwen_page": "qwen结果缺失",
+        "no_visual_items": "该页未提取到可分配视觉内容",
+        "no_page_mapping": "MinerU页码映射缺失",
+    }.get(reason or "", "内容待补充")
+    return f"> [图片/表格，{page_label}，内容待补充] {reason_label}。"
+
+
+def build_vision_page_map(vision_path: Path) -> Dict[int, Dict[str, Any]]:
+    data = load_json(vision_path, {"pages": []})
+    page_map: Dict[int, Dict[str, Any]] = {}
+    for entry in data.get("pages", []):
+        if not isinstance(entry, dict):
+            continue
+        page_num = int(entry.get("pdf_page_num") or entry.get("page_num") or 0)
+        if page_num <= 0:
+            continue
+        page_map[page_num] = entry
+    return page_map
+
+
+def parse_placeholder_page(image_ref: str, image_page_map: Dict[str, int]) -> Tuple[Optional[int], str]:
+    image_name = Path(image_ref).name
+    direct_match = PAGE_IMAGE_RE.search(image_ref)
+    if direct_match:
+        return int(direct_match.group(1)), image_name
+    return image_page_map.get(image_name), image_name
+
+
+def merge_mineru_qwen(
+    mineru_path: str | Path,
+    vision_path: str | Path,
+    content_list_paths: Sequence[str | Path],
+    output_path: str | Path,
+    report_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    mineru_path = Path(mineru_path)
+    vision_path = Path(vision_path)
+    output_path = Path(output_path)
+    content_paths = discover_content_lists(content_list_paths)
+    image_page_map = build_image_page_map(content_paths)
+    vision_page_map = build_vision_page_map(vision_path)
+    page_items = {page_num: build_page_items(entry) for page_num, entry in vision_page_map.items()}
+    page_cursors = {page_num: 0 for page_num in page_items}
+
+    mineru_text = mineru_path.read_text(encoding="utf-8", errors="ignore")
+    replaced_parts: List[str] = []
+    missed_list: List[Dict[str, Any]] = []
+    cursor = 0
+    replaced_count = 0
+    direct_replacements = 0
+    fallback_replacements = 0
+    total_placeholders = 0
+    page_occurrences: Dict[int, int] = {}
+
+    for idx, match in enumerate(PLACEHOLDER_RE.finditer(mineru_text), start=1):
+        replaced_parts.append(mineru_text[cursor : match.start()])
+        image_ref = match.group(1)
+        page_num, image_name = parse_placeholder_page(image_ref, image_page_map)
+        if page_num is not None:
+            page_occurrences[page_num] = page_occurrences.get(page_num, 0) + 1
+        replacement = None
+        reason = None
+        fallback_mode = None
+        book_page_label = None
+        if page_num is None:
+            reason = "no_page_mapping"
         else:
-            current.append(line)
-
-    if current:
-        sections.append({
-            'heading': current_heading,
-            'text': ''.join(current).strip(),
-            'has_img_placeholder': '![](' in ''.join(current),
-        })
-
-    return sections
-
-
-def merge(mineru_sections: list[dict], qwen_results: list[dict]) -> str:
-    """
-    合并策略：
-    1. 遍历 MinerU 段落
-    2. 遇到图片占位符 (![](...))，用 qwen 识别的对应内容替换
-    3. qwen 识别的表格单独追加到对应段落后面
-    """
-
-    # 建立 qwen 图片哈希 → 内容的映射（从 MinerU MD 提取哈希）
-    mineru_full = MINERU_MD.read_text(encoding='utf-8')
-    img_hashes  = re.findall(r'images/([a-f0-9]+)\.jpg', mineru_full)
-
-    # qwen 按页顺序，图片按 MinerU 顺序对应
-    # 每页 qwen 结果可能对应多个 MinerU 图片占位符
-    # 简化策略：把 qwen 所有表格和图片描述按顺序池化，按需取用
-    qwen_tables = []
-    qwen_descs  = []
-    for r in qwen_results:
-        tbls = extract_tables_from_qwen(r['text'])
-        dscs = extract_image_descriptions(r['text'])
-        for t in tbls:
-            qwen_tables.append({'page': r['file'], 'content': t})
-        for d in dscs:
-            qwen_descs.append({'page': r['file'], 'content': d})
-
-    print(f'  qwen 表格池: {len(qwen_tables)} 个')
-    print(f'  qwen 图片描述池: {len(qwen_descs)} 个')
-
-    # ── 逐段处理 MinerU ──
-    output_parts = []
-    table_idx = 0
-    desc_idx  = 0
-
-    for sec in mineru_sections:
-        text = sec['text']
-
-        if sec['has_img_placeholder']:
-            # 统计这个段落有多少图片占位符
-            placeholders = re.findall(r'!\[.*?\]\([^)]+\)', text)
-            n_imgs = len(placeholders)
-
-            # 替换占位符：先插入 qwen 识别内容
-            new_text = text
-
-            # 替换每个占位符
-            for ph in placeholders:
-                replacement_parts = []
-
-                # 如果有可用的表格，插入表格
-                if table_idx < len(qwen_tables):
-                    replacement_parts.append(
-                        f"\n<!-- qwen-vl 识别表格 (来自 {qwen_tables[table_idx]['page']}) -->\n"
-                        + qwen_tables[table_idx]['content']
+            vision_entry = vision_page_map.get(page_num)
+            if vision_entry:
+                book_page_label = vision_entry.get("book_page_label")
+            if not vision_entry:
+                reason = "no_qwen_page"
+            elif vision_entry.get("error"):
+                reason = "qwen_error"
+            else:
+                items = page_items.get(page_num) or []
+                cursor_idx = page_cursors.get(page_num, 0)
+                if cursor_idx < len(items):
+                    replacement = items[cursor_idx]
+                    page_cursors[page_num] = cursor_idx + 1
+                    direct_replacements += 1
+                elif items:
+                    reason = "page_items_exhausted"
+                    fallback_mode = "page_summary"
+                    replacement = build_summary_fallback(
+                        page_num=page_num,
+                        occurrence=page_occurrences.get(page_num, cursor_idx + 1),
+                        items=items,
+                        book_page_label=book_page_label,
                     )
-                    table_idx += 1
-                # 如果有图片描述，插入描述
-                elif desc_idx < len(qwen_descs):
-                    replacement_parts.append(
-                        f"\n> 📷 {qwen_descs[desc_idx]['content']}\n"
-                    )
-                    desc_idx += 1
                 else:
-                    # 保留原始占位符
-                    replacement_parts.append(ph)
-
-                replacement = '\n'.join(replacement_parts)
-                new_text = new_text.replace(ph, replacement, 1)
-
-            output_parts.append(new_text)
+                    reason = "no_visual_items"
+        if not replacement and reason and reason != "page_items_exhausted":
+            fallback_mode = "warning_note"
+            replacement = build_warning_fallback(page_num, reason, book_page_label)
+        if replacement:
+            replaced_parts.append("\n" + replacement + "\n")
+            replaced_count += 1
+            if fallback_mode:
+                fallback_replacements += 1
         else:
-            # 无图片占位符，直接保留 MinerU 文字
-            output_parts.append(text)
+            replaced_parts.append(match.group(0))
+        if reason:
+            missed_list.append(
+                {
+                    "placeholder_idx": idx,
+                    "image_name": image_name,
+                    "page_num": page_num,
+                    "reason": reason,
+                    "fallback_mode": fallback_mode,
+                }
+            )
+        total_placeholders += 1
+        cursor = match.end()
 
-    # ── 追加未消耗的 qwen 表格 ──
-    remaining_tables = qwen_tables[table_idx:]
-    if remaining_tables:
-        output_parts.append('\n\n---\n\n## 附录：qwen-vl 识别的额外表格\n')
-        for t in remaining_tables:
-            output_parts.append(f"\n<!-- {t['page']} -->\n{t['content']}\n")
+    replaced_parts.append(mineru_text[cursor:])
+    merged_text = "".join(replaced_parts)
+    merged_text = re.sub(r"\n{4,}", "\n\n\n", merged_text).strip() + "\n"
+    output_path.write_text(merged_text, encoding="utf-8")
+    residual_placeholders = len(PLACEHOLDER_RE.findall(merged_text))
 
-    return '\n\n'.join(output_parts)
+    misses_by_reason: Dict[str, int] = {}
+    for miss in missed_list:
+        reason = str(miss["reason"])
+        misses_by_reason[reason] = misses_by_reason.get(reason, 0) + 1
+
+    unused_qwen: List[Dict[str, Any]] = []
+    for page_num, entry in sorted(vision_page_map.items()):
+        items = page_items.get(page_num) or []
+        consumed = page_cursors.get(page_num, 0)
+        remaining = items[consumed:]
+        if not remaining:
+            continue
+        unused_qwen.append(
+            {
+                "page_num": page_num,
+                "book_page_label": entry.get("book_page_label"),
+                "unused_count": len(remaining),
+                "items": remaining,
+            }
+        )
+
+    report = {
+        "mineru_path": str(mineru_path),
+        "vision_path": str(vision_path),
+        "content_lists": [str(path) for path in content_paths],
+        "output_path": str(output_path),
+        "total_placeholders": total_placeholders,
+        "replaced_placeholders": replaced_count,
+        "direct_replacements": direct_replacements,
+        "fallback_replacements": fallback_replacements,
+        "residual_placeholders": residual_placeholders,
+        "misses_by_reason": misses_by_reason,
+        "missed_list": missed_list,
+        "unused_qwen_pages": len(unused_qwen),
+        "unused_qwen_items": sum(item["unused_count"] for item in unused_qwen),
+        "unused_qwen": unused_qwen,
+        "vision_pages": len(vision_page_map),
+        "vision_pages_with_errors": sorted(
+            page_num for page_num, entry in vision_page_map.items() if entry.get("error")
+        ),
+    }
+
+    if report_path is None:
+        report_path = output_path.with_name(f"{output_path.stem}_report.json")
+    report_path = Path(report_path)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
 
 
-def main():
-    print('=' * 60)
-    print('合并 MinerU + qwen-vl → 完整 MD')
-    print('=' * 60)
-
-    print('\n▶ 加载数据...')
-    mineru_sections = build_mineru_sections(MINERU_MD)
-    qwen_results    = load_qwen_results(RAW_JSON)
-    print(f'  MinerU 段落块: {len(mineru_sections)}')
-    print(f'  qwen 页面结果: {len(qwen_results)}')
-
-    img_sections = [s for s in mineru_sections if s['has_img_placeholder']]
-    print(f'  含图片占位符的段落: {len(img_sections)}')
-
-    print('\n▶ 合并中...')
-    merged = merge(mineru_sections, qwen_results)
-
-    # 清理多余空行
-    merged = re.sub(r'\n{4,}', '\n\n\n', merged)
-
-    OUTPUT_MD.write_text(merged, encoding='utf-8')
-
-    # 统计合并后质量
-    tables_in_merged = re.findall(r'(?:^\|.+\n)+', merged, re.MULTILINE)
-    words_in_merged  = re.findall(r'\b[a-zA-Z\u4e00-\u9fff]{2,}\b', merged.lower())
-    imgs_remaining   = re.findall(r'!\[.*?\]\([^)]+\)', merged)
-
-    print(f"""
-▶ 合并结果
-  文件大小:       {len(merged):,} 字符
-  表格数:         {len(tables_in_merged)}
-  总词数:         {len(words_in_merged):,}
-  残留图片占位符: {len(imgs_remaining)}（无法被 qwen 覆盖的）
-
-✅ 输出: {OUTPUT_MD}
-""")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mineru", required=True, help="Path to raw_mineru.md")
+    parser.add_argument("--vision", required=True, help="Path to raw_vision.json")
+    parser.add_argument(
+        "--content-list",
+        required=True,
+        action="append",
+        dest="content_lists",
+        help="Path to a MinerU content_list JSON or a directory containing them. Repeatable.",
+    )
+    parser.add_argument("--output", required=True, help="Path to raw_merged.md")
+    parser.add_argument("--report", help="Optional path for merge quality report JSON")
+    return parser
 
 
-if __name__ == '__main__':
-    main()
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    report = merge_mineru_qwen(
+        mineru_path=args.mineru,
+        vision_path=args.vision,
+        content_list_paths=args.content_lists,
+        output_path=args.output,
+        report_path=args.report,
+    )
+    print(json.dumps(
+        {
+            "replaced_placeholders": report["replaced_placeholders"],
+            "direct_replacements": report["direct_replacements"],
+            "fallback_replacements": report["fallback_replacements"],
+            "residual_placeholders": report["residual_placeholders"],
+            "unused_qwen_items": report["unused_qwen_items"],
+            "vision_pages_with_errors": report["vision_pages_with_errors"],
+            "report_path": str(Path(args.report) if args.report else Path(args.output).with_name(f'{Path(args.output).stem}_report.json')),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
