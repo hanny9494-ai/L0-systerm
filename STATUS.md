@@ -1,137 +1,54 @@
-# L0 餐饮研发引擎 — 项目状态
+# 餐饮研发引擎 — 项目状态 v2
 
-> 每次新对话fetch：
+> 每次新对话前fetch此文件：
 > https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/STATUS.md
 
+---
+
 ## 系统定位
-```
-最终形态：餐饮研发引擎
-目标用户：专业厨师 / 餐饮老板 / 研发团队
-核心能力：因果链推理（不是检索）
-```
+- **目标用户**：专业厨师 / 餐饮老板 / 研发团队
+- **核心能力**：因果链科学推理 + 粤菜审美转化（不是配方检索）
+- **最终形态**：餐饮研发引擎
 
 ---
 
-## 整体架构
-```
-┌─────────────────────────────────────────────┐
-│              餐饮研发引擎                      │
-│                                             │
-│  输入：审美意图 / 问题 / 食谱                  │
-│         ↓                                   │
-│  ┌──────────────────────────────┐           │
-│  │     双RAG引擎                 │           │
-│  │  传统RAG（Weaviate）          │           │
-│  │  → 回答"这个原理是什么"        │           │
-│  │  GraphRAG（Neo4j）           │           │
-│  │  → 回答"这些原理怎么联动"      │           │
-│  └──────────────────────────────┘           │
-│         ↓                                   │
-│  L0因果链推理                                │
-│         ↓                                   │
-│  输出：配方 / 解释 / 优化建议                  │
-└─────────────────────────────────────────────┘
-```
-
----
-
-## 知识层次架构
-```
-L0 科学原理图谱（因果链网络）
-    ↕ enables / conflicts / requires / amplifies
-    节点 = 科学原理
-    边 = 因果关系（带条件+强度）
-    来源：食品科学书蒸馏
-
-L6 风味审美层
-    ↕ 映射关系
-    粤菜审美文字 → L0解码
-    "清而不淡，鲜而不腥" →
-      清 = 低温长煮+撇浮沫
-      不淡 = 足够氨基酸萃取
-      鲜 = 食材新鲜度控制
-      不腥 = 挥发性胺去除
-    来源：Flavor Bible / Flavor Thesaurus / 粤菜文字
-
-配方参数库
-    传统食谱结构化提取
-    来源：Cookbook系列
-```
-
----
-
-## 三类问题能力
-```
-问题A：解释层
-"为什么我的鸡汤不够鲜？"
-→ L0原理库推理
-
-问题B：优化层
-"胶质感不够，参数怎么调？"
-→ L0 + 边界数据
-
-问题C：设计层
-"给我一个粤菜风格、满足健康+鲜味目标的鸡汤配方"
-→ L0 + 边界 + L6感官trade-off
-```
-
----
-
-## 合成数据策略
-```
-L0原理 × L6审美 → 生成配方推理链（海量）
-
-用途：
-→ 扩充参数空间覆盖
-→ 训练推理路径
-→ 后期fine-tune专属烹饪推理模型
-
-前提：L0质量要高，L6要来自真实文字
-不用于：扩充L0原理本身（防止幻觉）
-```
-
----
-
-## 当前进度
+## 当前进度总览
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| OFC Stage 1-3 | ✅ 完成 | 303条L0原理 |
-| MC Vol2 Stage 1 | 🔄 进行中 | 子对话4 |
-| MC Vol3/4/1 Stage 1 | 🔄 进行中 | batch_mc_stage1.py，Codex本地跑 |
-| MC Stage 2（向量匹配） | ⏳ 待做 | Gemini Embedding 2 |
-| MC Stage 3（蒸馏） | ⏳ 待做 | Claude Opus 4.6 |
-| Neo4j图谱搭建 | ⏳ 待做 | MC完成后 |
-| 因果链实验 | ⏳ 待做 | 验证GraphRAG方向 |
-| 第二批科学书 | ⏳ 待做 | Neurogastronomy等 |
-| L6风味层 | ⏳ 待做 | Flavor Bible结构化 |
-| 粤菜审美层 | ⏳ 待做 | 文字待下载 |
-| Cookbook结构化 | ⏳ 待做 | 配方参数库 |
-| 合成数据生成 | ⏳ 待做 | L0+L6就绪后 |
+| OFC Stage 1-3 | ✅ 完成 | 303条L0原理（l0_principles_fixed.jsonl）|
+| MC Vol2 Stage1 | 🔄 进行中 | Step3 merge完成，Step4/5待跑 |
+| MC Vol3/4 Stage1 | 🔄 进行中 | Step3 merge完成，Step4/5待跑 |
+| MC Vol1 Stage1 | ⏳ 待做 | epub需先转PDF（calibre）|
+| Stage2 Embedding | ⏳ 待做 | 切换Gemini Embedding 2 |
+| Stage3B 因果链 | ⏳ 待做 | 脚本已就绪，~$6，现在可跑 |
+| Stage3.5 粤菜映射 | ⏳ 待做 | Stage3B完成后 |
+| Neo4j 图谱 | ⏳ 待做 | Schema v2设计完成 |
+| Weaviate 向量库 | ⏳ 待做 | Schema设计完成 |
+| L6 风味层 | ⏳ 待做 | Flavor Bible待处理 |
+| Station层（粤菜） | ⏳ 待做 | 5个station定义完成 |
 
 ---
 
-## Pipeline流程（每本书）
+## 最优先执行（按顺序）
+
 ```
-PDF/epub
-  ↓ Step 0: epub→PDF（calibre）
-  ↓ Step 1: MinerU API（文字提取，超200页自动切分）
-  ↓ Step 2: qwen3-vl-plus（图片/表格识别）
-  ↓ Step 3: 合并 → raw_merged.md
-  ↓ Step 4: qwen3.5:2b（按章节切分，每章300-500字）
-  ↓ Step 5: qwen3.5:9b（标注summary+topics）
-  → chunks_smart.json
+① MC Vol2/3/4 跑 Step4（qwen3.5:2b切分）+ Step5（9b标注）
+   python batch_mc_stage1.py --vol 2 --start-step 4
+   python batch_mc_stage1.py --vol 3 --start-step 4
+   python batch_mc_stage1.py --vol 4 --start-step 4
 
-Stage 2：Gemini Embedding 2
-  chunks_smart.json → gemini-embedding-2-preview向量化
-  → 存入Weaviate
-  → 306题 × chunks cosine匹配
-  → question_chunk_matches.json
-  （用Batch API，50%折扣，~$0.10/M tokens）
+② Stage3B 因果链补充（脚本已在 scripts/stage3b_distill.py）
+   python scripts/stage3b_distill.py \
+     --input output/stage3/l0_principles_fixed.jsonl \
+     --matches output/stage2/question_chunk_matches.json \
+     --output output/stage3/l0_principles_v2.jsonl
 
-Stage 3：Claude蒸馏
-  question_chunk_matches.json → Claude Opus 4.6
-  → l0_principles.jsonl
+③ 切换 Gemini Embedding 2，重跑 Stage2（OFC+MC合并）
+
+④ Neo4j Docker 搭建 + Schema v2 导入
+
+⑤ 20道粤菜验证集（白切鸡等基准测试）
 ```
 
 ---
@@ -140,18 +57,72 @@ Stage 3：Claude蒸馏
 
 | 组件 | 选型 | 状态 |
 |------|------|------|
-| L0蒸馏 | Claude Opus 4.6，代理API | ✅ |
-| 代理API | http://1.95.142.151:3000 Bearer | ✅ |
-| PDF提取 | MinerU API（MINERU_API_KEY） | ✅ |
-| 图片/表格 | qwen3-vl-plus（DASHSCOPE_API_KEY） | ✅ |
-| 切分 | qwen3.5:2b Ollama本地 | ✅ |
-| 标注 | qwen3.5:9b Ollama本地 | ✅ |
-| Embedding | gemini-embedding-2-preview（GEMINI_API_KEY） | 🆕 |
-| 向量库 | Weaviate | ✅ |
+| PDF提取 | MinerU API + qwen3-vl-plus | ✅ |
+| 文本切分 | qwen3.5:2b Ollama | ✅ |
+| Topic标注 | qwen3.5:9b Ollama (think:False) | ✅ |
+| 原理蒸馏 | Claude Opus 4.6，代理API | ✅ |
+| 因果链蒸馏 | Claude Sonnet 4.6 | ⏳ |
+| Embedding | gemini-embedding-2-preview | ⏳ 切换中 |
+| 向量库 | Weaviate | ⏳ |
 | 图谱库 | Neo4j Docker | ⏳ |
 | 增量学习 | Cognee | ⏳ |
-| RAG平台 | Dify | ✅ |
-| epub转换 | calibre（ebook-convert） | ✅ |
+
+---
+
+## 关键文件路径
+
+```
+/Users/jeff/l0-knowledge-engine/
+├── data/l0_question_master.json              ✅ 306题
+├── output/
+│   ├── stage2/question_chunk_matches.json    ✅ OFC匹配结果
+│   ├── stage3/l0_principles_fixed.jsonl      ✅ 303条原理
+│   └── mc/
+│       ├── vol2/raw_merged.md                ✅ merge完成
+│       ├── vol3/raw_merged.md                ✅ merge完成
+│       └── vol4/raw_merged.md                ✅ merge完成
+└── scripts/
+    ├── batch_mc_stage1.py                    ✅ GitHub已有
+    ├── merge_mineru_qwen.py                  ✅ GitHub已有
+    ├── stage3b_distill.py                    ✅ 新增
+    ├── scan_low_hit_chunks.py                ✅ 新增
+    └── review_new_questions.html             ✅ 新增
+```
+
+---
+
+## L0 原理库设计（v2）
+
+### 原子命题类型（4种）
+- `fact_atom` — 单一数值事实（~35%，106条）
+- `causal_chain` — 因果序列A→B→C（~45%，136条）
+- `compound_condition` — n元同时条件（~15%，45条，超边候选）
+- `mathematical_law` — 定量数学关系（~5%，15条）
+
+### Domain分类（16个，v2）
+保留8个不变：protein_science / carbohydrate / lipid_science /
+fermentation / food_safety / water_activity / enzyme / color_pigment / equipment_physics
+
+新增/拆分7个：
+- chemical_reaction → maillard_caramelization / oxidation_reduction / salt_acid_chemistry
+- flavor_sensory → taste_perception / aroma_volatiles
+- heat_transfer + physical_change → thermal_dynamics / mass_transfer
+- 新增：texture_rheology
+
+---
+
+## 子对话启动模板
+
+```
+请先fetch以下文件获取项目最新状态：
+https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/STATUS.md
+
+需要用到的脚本（按需fetch）：
+https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/scripts/batch_mc_stage1.py
+https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/scripts/merge_mineru_qwen.py
+https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/scripts/stage3b_distill.py
+https://raw.githubusercontent.com/hanny9494-ai/L0-systerm/main/scripts/scan_low_hit_chunks.py
+```
 
 ---
 
@@ -159,104 +130,11 @@ Stage 3：Claude蒸馏
 ```bash
 export MINERU_API_KEY=""
 export DASHSCOPE_API_KEY=""
-export GEMINI_API_KEY=""        # Google AI Studio
-# Claude代理不用key，用Bearer在脚本里配置
+export GEMINI_API_KEY=""
+export ANTHROPIC_BASE_URL="http://1.95.142.151:3000"
+export ANTHROPIC_API_KEY="Bearer"
 ```
 
----
-
-## 关键文件路径
-```
-/Users/jeff/l0-knowledge-engine/
-├── data/l0_question_master.json              ✅ 306题
-├── output/
-│   ├── stage3/l0_principles_fixed.jsonl     ✅ 303条OFC原理
-│   └── mc/
-│       ├── batch_progress.json              🔄 进度追踪
-│       ├── vol2/stage1/chunks_smart.json    🔄 生成中
-│       ├── vol3/stage1/chunks_smart.json    🔄 生成中
-│       ├── vol4/stage1/chunks_smart.json    ⏳
-│       └── vol1/stage1/chunks_smart.json    ⏳
-└── scripts/
-    ├── batch_mc_stage1.py                   ✅ Codex已推
-    └── mineru_api.py                        ✅
-
-/Users/jeff/Documents/厨书数据库/            📚 书库
-```
-
----
-
-## 书库规划
-
-### 第一批：科学书（蒸馏L0）
-| 书名 | 状态 |
-|------|------|
-| On Food and Cooking | ✅ 完成 |
-| Modernist Cuisine Vol 1-4 | 🔄 进行中 |
-| The Professional Chef | ⏳ |
-| The Science of Good Cooking | ⏳ |
-| Neurogastronomy | ⏳ |
-| Molecular Gastronomy (Hervé This) | ⏳ |
-| Mouthfeel | ⏳ |
-| The Art of Fermentation | ⏳ |
-| Koji Alchemy | ⏳ |
-| The Science of Spice | ⏳ |
-| Flavorama | ⏳ |
-| Professional Baking 7th Ed | ⏳ |
-| 冰淇淋风味学 | ⏳ |
-
-### 第二批：风味图谱（直接作为L6节点）
-```
-Flavor Bible → 风味搭配关系
-Flavor Thesaurus → 风味关联
-```
-
-### 第三批：粤菜（待下载）
-```
-传统粤菜审美文字 → L6语言层（护城河）
-粤菜食谱 → 配方参数库
-```
-
-### 第四批：Cookbook（结构化提取配方参数）
-```
-French Laundry, Alinea, Noma, Momofuku,
-Sous Vide (Keller), Charcuterie, Ratio...
-```
-
----
-
-## 下一步优先级
-```
-P0：MC Vol2/3/4/1 Stage1全部完成
-P0：Stage2 Gemini Embedding 2版本（Codex写）
-P1：MC Stage3蒸馏
-P2：Neo4j + Cognee搭建
-P3：第二批科学书
-P4：粤菜书下载+处理
-P5：L6风味层建立
-P6：合成数据生成
-```
-
----
-
-## GraphRAG图谱设计（待实施）
-```
-节点类型：
-→ Principle（L0原理）
-→ Ingredient（食材）
-→ Technique（技法）
-→ FlavorProfile（风味特征）
-→ AestheticGoal（审美目标，L6）
-
-边类型：
-→ enables（A使B成为可能）
-→ conflicts（A与B冲突）
-→ requires（A需要B作前提）
-→ amplifies（A增强B的效果）
-→ maps_to（L6审美 → L0原理）
-
-边属性：
-→ condition（在什么条件下）
-→ strength（0-1强度）
-→ source_book（来源）
-```
+## GitHub
+- Repo: https://github.com/hanny9494-ai/L0-systerm
+- 本地同步: ~/L0-docs/
