@@ -24,6 +24,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pdf", required=True)
     parser.add_argument("--book-dir", required=True)
+    parser.add_argument("--force-all", action="store_true")
+    parser.add_argument("--pages", help="Comma-separated PDF page numbers to rerun")
     args = parser.parse_args()
 
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
@@ -42,15 +44,32 @@ def main() -> int:
     existing = mod.load_json(vision_path, {"pages": []})
     page_results = {int(item["page_num"]): item for item in existing.get("pages", []) if "page_num" in item}
 
-    missing_pages = [
-        page_num
-        for page_num in target_pages
-        if (page_num not in page_results)
-        or page_results[page_num].get("error")
-        or page_results[page_num].get("parsed") is None
-    ]
+    explicit_pages = []
+    if args.pages:
+        explicit_pages = sorted(
+            {
+                int(item.strip())
+                for item in args.pages.split(",")
+                if item.strip()
+            }
+        )
+
+    if explicit_pages:
+        missing_pages = [page_num for page_num in explicit_pages if page_num in target_pages]
+    elif args.force_all:
+        missing_pages = list(target_pages)
+    else:
+        missing_pages = [
+            page_num
+            for page_num in target_pages
+            if (page_num not in page_results)
+            or page_results[page_num].get("error")
+            or page_results[page_num].get("parsed") is None
+        ]
     print(
-        f"[step2] repairing {len(missing_pages)} page(s) out of {len(target_pages)} target page(s)",
+        f"[step2] repairing {len(missing_pages)} page(s) out of {len(target_pages)} target page(s)"
+        f"{' (force_all)' if args.force_all else ''}"
+        f"{' (explicit_pages)' if explicit_pages else ''}",
         flush=True,
     )
 

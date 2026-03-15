@@ -29,6 +29,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("books", nargs="+", choices=sorted(SOURCE_MAP.keys()))
     parser.add_argument("--skip-vision", action="store_true")
+    parser.add_argument("--force-vision", action="store_true")
     args = parser.parse_args()
 
     mod = load_batch_module()
@@ -36,7 +37,7 @@ def main() -> int:
         book_dir = Path(f"/Users/jeff/l0-knowledge-engine/output/mc/{book}")
         print(f"=== {book} ===", flush=True)
         if not args.skip_vision:
-            mod.run_step2_vision(SOURCE_MAP[book], book_dir)
+            mod.run_step2_vision(SOURCE_MAP[book], book_dir, force=args.force_vision)
         mod.run_step3_merge(book_dir)
         print(f"=== {book} done ===", flush=True)
     return 0
